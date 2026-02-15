@@ -1,6 +1,6 @@
 {
     "name": "napcat-plugin-today-wife",
-    "version": "1.0.0",
+    "version": "1.0.1",
     "description": "群聊互动插件 - 发送'今日老婆'随机抽取群成员作为今日老婆，支持每日记录和头像展示",
     "author": "L-LYZ",
     "type": "module",
