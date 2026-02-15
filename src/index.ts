@@ -1,157 +1,236 @@
-/**
- * NapCat 插件模板 - 主入口
- *
- * 导出 PluginModule 接口定义的生命周期函数，NapCat 加载插件时会调用这些函数。
- *
- * 生命周期：
- *   plugin_init        → 插件加载时调用（必选）
- *   plugin_onmessage   → 收到事件时调用（需通过 post_type 判断事件类型）
- *   plugin_onevent     → 收到所有 OneBot 事件时调用
- *   plugin_cleanup     → 插件卸载/重载时调用
- *
- * 配置相关：
- *   plugin_config_ui          → 导出配置 Schema，用于 WebUI 自动生成配置面板
- *   plugin_get_config         → 自定义配置读取
- *   plugin_set_config         → 自定义配置保存
- *   plugin_on_config_change   → 配置变更回调
- *
- * @author Your Name
- * @license MIT
- */
+const config = {
+    enabled: true,
+    keyword: '今日老婆',
+    cooldown: 5000,
+    memberCacheExpiry: 3600000
+};
 
-import type {
-    PluginModule,
-    PluginConfigSchema,
-    PluginConfigUIController,
-    NapCatPluginContext,
-} from 'napcat-types/napcat-onebot/network/plugin/types';
-import { EventType } from 'napcat-types/napcat-onebot/event/index';
+const cooldownMap = new Map();
+const todayWifeMap = new Map();
+const memberCache = new Map();
 
-import { buildConfigSchema } from './config';
-import { pluginState } from './core/state';
-import { handleMessage } from './handlers/message-handler';
-import { registerApiRoutes } from './services/api-service';
-import type { PluginConfig } from './types';
+export async function plugin_init(ctx) {
+    ctx.logger.info('[今日老婆] 插件初始化完成');
+}
 
-// ==================== 配置 UI Schema ====================
-
-/** NapCat WebUI 读取此导出来展示配置面板 */
-export let plugin_config_ui: PluginConfigSchema = [];
-
-// ==================== 生命周期函数 ====================
-
-/**
- * 插件初始化（必选）
- * 加载配置、注册 WebUI 路由和页面
- */
-export const plugin_init: PluginModule['plugin_init'] = async (ctx) => {
-    try {
-        // 1. 初始化全局状态（加载配置）
-        pluginState.init(ctx);
-
-        ctx.logger.info('插件初始化中...');
-
-        // 2. 生成配置 Schema（用于 NapCat WebUI 配置面板）
-        plugin_config_ui = buildConfigSchema(ctx);
-
-        // 3. 注册 WebUI 页面和静态资源
-        registerWebUI(ctx);
-
-        // 4. 注册 API 路由
-        registerApiRoutes(ctx);
-
-        ctx.logger.info('插件初始化完成');
-    } catch (error) {
-        ctx.logger.error('插件初始化失败:', error);
+export async function plugin_onmessage(ctx, event) {
+    if (event.message_type !== 'group') return;
+    
+    const rawMessage = event.raw_message || '';
+    if (!rawMessage.includes(config.keyword)) return;
+    
+    const groupId = event.group_id;
+    const userId = event.user_id;
+    
+    const key = `${groupId}:${userId}`;
+    const now = Date.now();
+    
+    if (cooldownMap.has(key)) {
+        const lastTime = cooldownMap.get(key);
+        if (now - lastTime < config.cooldown) return;
     }
-};
-
-/**
- * 消息/事件处理（可选）
- * 收到事件时调用，需通过 post_type 判断是否为消息事件
- */
-export const plugin_onmessage: PluginModule['plugin_onmessage'] = async (ctx, event) => {
-    // 仅处理消息事件
-    if (event.post_type !== EventType.MESSAGE) return;
-    // 检查插件是否启用
-    if (!pluginState.config.enabled) return;
-    // 委托给消息处理器
-    await handleMessage(ctx, event);
-};
-
-/**
- * 事件处理（可选）
- * 处理所有 OneBot 事件（通知、请求等）
- */
-export const plugin_onevent: PluginModule['plugin_onevent'] = async (ctx, event) => {
-    // TODO: 在这里处理通知、请求等非消息事件
-    // 示例：
-    // if (event.post_type === EventType.NOTICE) { ... }
-    // if (event.post_type === EventType.REQUEST) { ... }
-};
-
-/**
- * 插件卸载/重载（可选）
- * 必须清理定时器、关闭连接等资源
- */
-export const plugin_cleanup: PluginModule['plugin_cleanup'] = async (ctx) => {
+    
+    cooldownMap.set(key, now);
+    
     try {
-        // TODO: 在这里清理你的资源（定时器、WebSocket 连接等）
-        pluginState.cleanup();
-        ctx.logger.info('插件已卸载');
-    } catch (e) {
-        ctx.logger.warn('插件卸载时出错:', e);
-    }
-};
-
-// ==================== 配置管理钩子 ====================
-
-/** 获取当前配置 */
-export const plugin_get_config: PluginModule['plugin_get_config'] = async (ctx) => {
-    return pluginState.config;
-};
-
-/** 设置配置（完整替换，由 NapCat WebUI 调用） */
-export const plugin_set_config: PluginModule['plugin_set_config'] = async (ctx, config) => {
-    pluginState.replaceConfig(config as PluginConfig);
-    ctx.logger.info('配置已通过 WebUI 更新');
-};
-
-/**
- * 配置变更回调
- * 当 WebUI 中修改单个配置项时触发（需配置项标记 reactive: true）
- */
-export const plugin_on_config_change: PluginModule['plugin_on_config_change'] = async (
-    ctx, ui, key, value, currentConfig
-) => {
-    try {
-        pluginState.updateConfig({ [key]: value });
-        ctx.logger.debug(`配置项 ${key} 已更新`);
+        const existingWife = getTodayWife(key, now);
+        if (existingWife) {
+            await sendWifeMessage(ctx, groupId, userId, existingWife.wifeId, existingWife.wifeName, true);
+            return;
+        }
+        
+        const members = await getGroupMembers(ctx, groupId);
+        
+        if (!members || members.length === 0) {
+            await sendMessage(ctx, groupId, userId, '获取群成员列表失败，请稍后重试');
+            return;
+        }
+        
+        const filtered = members.filter(m => m.user_id !== userId);
+        
+        if (filtered.length === 0) {
+            await sendMessage(ctx, groupId, userId, '没有可抽取的群成员');
+            return;
+        }
+        
+        const idx = Math.floor(Math.random() * filtered.length);
+        const selected = filtered[idx];
+        const wifeName = selected.card || selected.nickname || '未知成员';
+        
+        setTodayWife(key, selected.user_id, wifeName, now);
+        
+        ctx.logger.info(`[今日老婆] 群${groupId} 用户${userId} 抽取到 ${selected.user_id}(${wifeName})`);
+        
+        await sendWifeMessage(ctx, groupId, userId, selected.user_id, wifeName, false);
+        
     } catch (err) {
-        ctx.logger.error(`更新配置项 ${key} 失败:`, err);
+        ctx.logger.error('[今日老婆] 错误:', err);
+        await sendMessage(ctx, groupId, userId, '处理请求时发生错误');
     }
-};
+}
 
-// ==================== 内部函数 ====================
+function getTodayWife(key, now) {
+    const record = todayWifeMap.get(key);
+    if (!record) return null;
+    
+    const recordDate = new Date(record.timestamp);
+    const nowDate = new Date(now);
+    
+    if (recordDate.getFullYear() === nowDate.getFullYear() &&
+        recordDate.getMonth() === nowDate.getMonth() &&
+        recordDate.getDate() === nowDate.getDate()) {
+        return record;
+    }
+    
+    return null;
+}
 
-/**
- * 注册 WebUI 页面和静态资源
- */
-function registerWebUI(ctx: NapCatPluginContext): void {
-    const router = ctx.router;
-
-    // 托管前端静态资源（构建产物在 webui/ 目录下）
-    // 访问路径: /plugin/<plugin-id>/files/static/
-    router.static('/static', 'webui');
-
-    // 注册仪表盘页面（显示在 NapCat WebUI 侧边栏）
-    // 访问路径: /plugin/<plugin-id>/page/dashboard
-    router.page({
-        path: 'dashboard',
-        title: '插件仪表盘',
-        htmlFile: 'webui/index.html',
-        description: '插件管理控制台',
+function setTodayWife(key, wifeId, wifeName, timestamp) {
+    todayWifeMap.set(key, {
+        wifeId: wifeId,
+        wifeName: wifeName,
+        timestamp: timestamp
     });
+}
 
-    ctx.logger.debug('WebUI 路由注册完成');
+async function getGroupMembers(ctx, groupId) {
+    const now = Date.now();
+    const cacheKey = String(groupId);
+    
+    const cached = memberCache.get(cacheKey);
+    if (cached && (now - cached.timestamp < config.memberCacheExpiry)) {
+        ctx.logger.info(`[今日老婆] 使用缓存的群成员列表，共${cached.members.length}人`);
+        return cached.members;
+    }
+    
+    try {
+        let result;
+        
+        if (ctx.actions.get_group_member_list) {
+            result = await ctx.actions.get_group_member_list({ group_id: cacheKey });
+        } else if (ctx.apis && ctx.apis.getGroupMemberList) {
+            result = await ctx.apis.getGroupMemberList(cacheKey);
+        } else {
+            result = await ctx.actions.call(
+                'get_group_member_list',
+                { group_id: cacheKey },
+                ctx.adapterName,
+                ctx.pluginManager.config
+            );
+        }
+        
+        let members = [];
+        
+        if (Array.isArray(result)) {
+            members = result;
+        } else if (result && result.data) {
+            if (Array.isArray(result.data)) {
+                members = result.data;
+            } else if (typeof result.data === 'object') {
+                members = Object.values(result.data);
+            }
+        }
+        
+        if (members.length > 0) {
+            memberCache.set(cacheKey, {
+                members: members,
+                timestamp: now
+            });
+            ctx.logger.info(`[今日老婆] 已缓存群${groupId}成员列表，共${members.length}人`);
+        }
+        
+        return members;
+    } catch (err) {
+        ctx.logger.error('[今日老婆] 获取群成员失败:', err.message);
+        
+        if (cached) {
+            ctx.logger.warn('[今日老婆] 使用过期的缓存数据');
+            return cached.members;
+        }
+        
+        return [];
+    }
+}
+
+export async function plugin_cleanup(ctx) {
+    memberCache.clear();
+    todayWifeMap.clear();
+    cooldownMap.clear();
+    ctx.logger.info('[今日老婆] 插件已卸载，缓存已清理');
+}
+
+export function plugin_config_ui(ctx) {
+    return ctx.NapCatConfig.combine(
+        ctx.NapCatConfig.boolean('enabled', '启用插件', true),
+        ctx.NapCatConfig.text('keyword', '触发关键词', '今日老婆'),
+        ctx.NapCatConfig.number('cooldown', '冷却时间(毫秒)', 5000)
+    );
+}
+
+export function plugin_get_config() {
+    return config;
+}
+
+export function plugin_set_config(ctx, newConfig) {
+    if (newConfig) {
+        Object.assign(config, newConfig);
+    }
+}
+
+async function sendMessage(ctx, groupId, userId, text) {
+    try {
+        const message = [
+            { type: 'at', data: { qq: String(userId) } },
+            { type: 'text', data: { text: ' ' + text } }
+        ];
+        
+        if (ctx.actions.send_group_msg) {
+            await ctx.actions.send_group_msg({ group_id: String(groupId), message });
+        } else if (ctx.apis && ctx.apis.sendGroupMsg) {
+            await ctx.apis.sendGroupMsg(String(groupId), message);
+        } else {
+            await ctx.actions.call(
+                'send_group_msg',
+                { group_id: String(groupId), message },
+                ctx.adapterName,
+                ctx.pluginManager.config
+            );
+        }
+    } catch (err) {
+        ctx.logger.error('[今日老婆] 发送消息失败:', err);
+    }
+}
+
+async function sendWifeMessage(ctx, groupId, userId, wifeId, wifeName, isRepeat) {
+    try {
+        const avatarUrl = `https://q1.qlogo.cn/g?b=qq&nk=${wifeId}&s=640`;
+        
+        let text = '';
+        if (isRepeat) {
+            text = ` 你今天已经抽过老婆了！你的老婆依然是 @${wifeName}`;
+        } else {
+            text = ` 今天你的老婆是 @${wifeName}`;
+        }
+        
+        const message = [
+            { type: 'at', data: { qq: String(userId) } },
+            { type: 'text', data: { text: text } },
+            { type: 'image', data: { file: avatarUrl } }
+        ];
+        
+        if (ctx.actions.send_group_msg) {
+            await ctx.actions.send_group_msg({ group_id: String(groupId), message });
+        } else if (ctx.apis && ctx.apis.sendGroupMsg) {
+            await ctx.apis.sendGroupMsg(String(groupId), message);
+        } else {
+            await ctx.actions.call(
+                'send_group_msg',
+                { group_id: String(groupId), message },
+                ctx.adapterName,
+                ctx.pluginManager.config
+            );
+        }
+    } catch (err) {
+        ctx.logger.error('[今日老婆] 发送老婆消息失败:', err);
+    }
 }
